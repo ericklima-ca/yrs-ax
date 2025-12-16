@@ -3,6 +3,12 @@ name = "yrs-ax"
 version = "0.0.1"
 edition = "2024"
 authors = ["Erick Amorim <github.com/ericklima-ca>"]
+description = "Axum-based WebSocket and signaling utilities for Yrs/Yjs collaborative editing"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/ericklima-ca/yrs-ax"
+documentation = "https://docs.rs/yrs-ax"
+keywords = ["yjs", "yrs", "crdt", "axum", "webrtc", "websockets", "signaling", "collaborative-editing"]
 
 [dependencies]
 axum = { version = "0.8.7", features = ["ws"] }
