@@ -206,9 +206,6 @@ pub async fn signaling_conn(ws: WebSocket, service: SignalingService) -> Result<
     }
 }
 
-const PING_MSG: &str = r#"{"type":"ping"}"#;
-const PONG_MSG: &str = r#"{"type":"pong"}"#;
-
 async fn process_msg(
     msg: Message,
     ws: &WsSink,
@@ -282,13 +279,6 @@ async fn process_msg(
                         }
                     }
                 }
-                Signal::Ping => {
-                    ws.try_send(Message::text(PONG_MSG)).await?;
-                }
-                Signal::Pong => {
-                    state.pong_received = true;
-                    ws.try_send(Message::text(PING_MSG)).await?;
-                }
             }
         }
         Message::Close(_) => {
@@ -340,8 +330,264 @@ pub(crate) enum Signal<'a> {
     Subscribe { topics: Vec<&'a str> },
     #[serde(rename = "unsubscribe")]
     Unsubscribe { topics: Vec<&'a str> },
-    #[serde(rename = "ping")]
-    Ping,
-    #[serde(rename = "pong")]
-    Pong,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_signal_subscribe_serialization() {
+        let subscribe = Signal::Subscribe {
+            topics: vec!["room1", "room2"],
+        };
+        let json = serde_json::to_string(&subscribe).unwrap();
+        assert!(json.contains("\"type\":\"subscribe\""));
+        assert!(json.contains("\"topics\""));
+        assert!(json.contains("room1"));
+        assert!(json.contains("room2"));
+    }
+
+    #[test]
+    fn test_signal_unsubscribe_serialization() {
+        let unsubscribe = Signal::Unsubscribe {
+            topics: vec!["room1"],
+        };
+        let json = serde_json::to_string(&unsubscribe).unwrap();
+        assert!(json.contains("\"type\":\"unsubscribe\""));
+        assert!(json.contains("\"topics\""));
+        assert!(json.contains("room1"));
+    }
+
+    #[test]
+    fn test_signal_publish_serialization() {
+        let publish = Signal::Publish { topic: "room1" };
+        let json = serde_json::to_string(&publish).unwrap();
+        assert!(json.contains("\"type\":\"publish\""));
+        assert!(json.contains("\"topic\":\"room1\""));
+    }
+
+    #[test]
+    fn test_signal_subscribe_deserialization() {
+        let json = r#"{"type":"subscribe","topics":["room1","room2"]}"#;
+        let signal: Signal = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            signal,
+            Signal::Subscribe {
+                topics: vec!["room1", "room2"]
+            }
+        );
+    }
+
+    #[test]
+    fn test_signal_unsubscribe_deserialization() {
+        let json = r#"{"type":"unsubscribe","topics":["room1"]}"#;
+        let signal: Signal = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            signal,
+            Signal::Unsubscribe {
+                topics: vec!["room1"]
+            }
+        );
+    }
+
+    #[test]
+    fn test_signal_publish_deserialization() {
+        let json = r#"{"type":"publish","topic":"room1"}"#;
+        let signal: Signal = serde_json::from_str(json).unwrap();
+        assert_eq!(signal, Signal::Publish { topic: "room1" });
+    }
+
+    #[test]
+    fn test_signal_invalid_type_deserialization() {
+        let json = r#"{"type":"invalid","topics":[]}"#;
+        let result: Result<Signal, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signal_missing_field_deserialization() {
+        // Missing topics field for subscribe
+        let json = r#"{"type":"subscribe"}"#;
+        let result: Result<Signal, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_signaling_service_new() {
+        let service = SignalingService::new();
+        let topics = service.0.read().await;
+        assert_eq!(topics.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_signaling_service_default() {
+        let service = SignalingService::default();
+        let topics = service.0.read().await;
+        assert_eq!(topics.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_signaling_service_clone() {
+        let service = SignalingService::new();
+        let cloned = service.clone();
+
+        // Both should point to the same underlying data
+        let topics1 = service.0.read().await;
+        let topics2 = cloned.0.read().await;
+        assert_eq!(topics1.len(), topics2.len());
+    }
+
+    #[test]
+    fn test_conn_state_default() {
+        let state = ConnState::default();
+        assert!(!state.closed);
+        assert!(state.pong_received);
+        assert_eq!(state.subscribed_topics.len(), 0);
+    }
+
+    #[test]
+    fn test_conn_state_subscribed_topics() {
+        let mut state = ConnState::default();
+
+        // Add topics
+        let topic1: Arc<str> = "room1".into();
+        let topic2: Arc<str> = "room2".into();
+
+        state.subscribed_topics.insert(topic1.clone());
+        state.subscribed_topics.insert(topic2.clone());
+
+        assert_eq!(state.subscribed_topics.len(), 2);
+        assert!(state.subscribed_topics.contains(&topic1));
+        assert!(state.subscribed_topics.contains(&topic2));
+
+        // Drain topics
+        let drained: Vec<_> = state.subscribed_topics.drain().collect();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(state.subscribed_topics.len(), 0);
+    }
+
+    #[test]
+    fn test_ws_sink_hash_equality() {
+        use std::collections::hash_map::DefaultHasher;
+
+        // Test that Arc pointer-based equality works correctly
+        let arc1 = Arc::new(Mutex::new(()));
+        let arc2 = Arc::new(Mutex::new(()));
+        let arc1_clone = arc1.clone();
+
+        let ptr1 = Arc::as_ptr(&arc1) as usize;
+        let ptr2 = Arc::as_ptr(&arc2) as usize;
+        let ptr1_clone = Arc::as_ptr(&arc1_clone) as usize;
+
+        // Same Arc should have same pointer
+        assert_eq!(ptr1, ptr1_clone);
+        // Different Arc should have different pointer
+        assert_ne!(ptr1, ptr2);
+
+        // Test Hash consistency
+        let mut hasher1 = DefaultHasher::new();
+        ptr1.hash(&mut hasher1);
+        let hash1 = hasher1.finish();
+
+        let mut hasher2 = DefaultHasher::new();
+        ptr1_clone.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_ping_timeout_constant() {
+        assert_eq!(PING_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_signal_roundtrip() {
+        // Test that serialization and deserialization are inverses
+        let signals = vec![
+            Signal::Subscribe {
+                topics: vec!["room1", "room2", "room3"],
+            },
+            Signal::Unsubscribe {
+                topics: vec!["room1"],
+            },
+            Signal::Publish { topic: "test-room" },
+        ];
+
+        for original in signals {
+            let json = serde_json::to_string(&original).unwrap();
+            let deserialized: Signal = serde_json::from_str(&json).unwrap();
+            assert_eq!(original, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_signal_with_empty_topics() {
+        // Subscribe with empty topics
+        let subscribe = Signal::Subscribe { topics: vec![] };
+        let json = serde_json::to_string(&subscribe).unwrap();
+        let deserialized: Signal = serde_json::from_str(&json).unwrap();
+        assert_eq!(subscribe, deserialized);
+
+        // Unsubscribe with empty topics
+        let unsubscribe = Signal::Unsubscribe { topics: vec![] };
+        let json = serde_json::to_string(&unsubscribe).unwrap();
+        let deserialized: Signal = serde_json::from_str(&json).unwrap();
+        assert_eq!(unsubscribe, deserialized);
+    }
+
+    #[test]
+    fn test_signal_with_special_characters() {
+        // Test that topic names with special characters are handled correctly
+        let topics = vec!["room-1", "room_2", "room.3", "room:4"];
+        let subscribe = Signal::Subscribe {
+            topics: topics.clone(),
+        };
+        let json = serde_json::to_string(&subscribe).unwrap();
+        let deserialized: Signal = serde_json::from_str(&json).unwrap();
+        assert_eq!(subscribe, deserialized);
+    }
+
+    #[tokio::test]
+    async fn test_topics_concurrent_access() {
+        // Test that Topics (Arc<RwLock<...>>) can be accessed concurrently
+        let topics: Topics = Arc::new(RwLock::new(HashMap::new()));
+
+        let topics1 = topics.clone();
+        let topics2 = topics.clone();
+
+        // Spawn two tasks that access the topics concurrently
+        let handle1 = tokio::spawn(async move {
+            let read_guard = topics1.read().await;
+            read_guard.len()
+        });
+
+        let handle2 = tokio::spawn(async move {
+            let read_guard = topics2.read().await;
+            read_guard.len()
+        });
+
+        let result1 = handle1.await.unwrap();
+        let result2 = handle2.await.unwrap();
+
+        assert_eq!(result1, 0);
+        assert_eq!(result2, 0);
+    }
+
+    #[tokio::test]
+    async fn test_topics_write_access() {
+        // Test that we can write to topics
+        let topics: Topics = Arc::new(RwLock::new(HashMap::new()));
+
+        {
+            let mut write_guard = topics.write().await;
+            let topic: Arc<str> = "test-room".into();
+            write_guard.insert(topic, HashSet::new());
+        }
+
+        let read_guard = topics.read().await;
+        assert_eq!(read_guard.len(), 1);
+        assert!(read_guard.contains_key("test-room"));
+    }
 }

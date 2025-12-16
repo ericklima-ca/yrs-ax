@@ -3,16 +3,16 @@ use crate::AwarenessRef;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::select;
-use tokio::sync::broadcast::error::SendError;
-use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
+use tokio::sync::broadcast::error::SendError;
+use tokio::sync::broadcast::{Receiver, Sender, channel};
 use tokio::task::JoinHandle;
+use yrs::Update;
 use yrs::encoding::write::Write;
 use yrs::sync::protocol::{MSG_SYNC, MSG_SYNC_UPDATE};
 use yrs::sync::{DefaultProtocol, Error, Message, Protocol, SyncMessage};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
-use yrs::Update;
 
 /// A broadcast group can be used to propagate updates produced by yrs [yrs::Doc] and [Awareness]
 /// structures in a binary form that conforms to a y-sync protocol.
@@ -244,7 +244,7 @@ impl Subscription {
 #[cfg(test)]
 mod test {
     use crate::broadcast::BroadcastGroup;
-    use futures_util::{ready, SinkExt, StreamExt};
+    use futures_util::{SinkExt, StreamExt, ready};
     use serde_json::json;
     use std::collections::HashMap;
     use std::pin::Pin;

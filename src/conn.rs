@@ -255,9 +255,10 @@ mod test {
     async fn start_server(
         addr: SocketAddr,
         bcast: BroadcastGroup,
-    ) -> Result<JoinHandle<()>, Box<dyn std::error::Error>> {
+    ) -> Result<(SocketAddr, JoinHandle<()>), Box<dyn std::error::Error>> {
         let server = TcpListener::bind(addr).await?;
-        Ok(tokio::spawn(async move {
+        let bound_addr = server.local_addr()?;
+        let handle = tokio::spawn(async move {
             let mut subscribers = Vec::new();
             while let Ok((stream, _)) = server.accept().await {
                 let (reader, writer) = stream.into_split();
@@ -266,7 +267,8 @@ mod test {
                 let sub = bcast.subscribe(Arc::new(Mutex::new(sink)), stream);
                 subscribers.push(sub);
             }
-        }))
+        });
+        Ok((bound_addr, handle))
     }
 
     async fn client(
@@ -295,12 +297,12 @@ mod test {
     #[tokio::test]
     async fn change_introduced_by_server_reaches_subscribed_clients()
     -> Result<(), Box<dyn std::error::Error>> {
-        let server_addr = SocketAddr::from_str("127.0.0.1:6600").unwrap();
+        let bind_addr = SocketAddr::from_str("127.0.0.1:0").unwrap();
         let doc = Doc::with_client_id(1);
         let text = doc.get_or_insert_text("test");
         let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server(server_addr, bcast).await?;
+        let (server_addr, _server) = start_server(bind_addr, bcast).await?;
 
         let doc = Doc::new();
         let (n, _sub) = create_notifier(&doc);
@@ -325,7 +327,7 @@ mod test {
 
     #[tokio::test]
     async fn subscribed_client_fetches_initial_state() -> Result<(), Box<dyn std::error::Error>> {
-        let server_addr = SocketAddr::from_str("127.0.0.1:6601").unwrap();
+        let bind_addr = SocketAddr::from_str("127.0.0.1:0").unwrap();
         let doc = Doc::with_client_id(1);
         let text = doc.get_or_insert_text("test");
 
@@ -333,7 +335,7 @@ mod test {
 
         let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server(server_addr, bcast).await?;
+        let (server_addr, _server) = start_server(bind_addr, bcast).await?;
 
         let doc = Doc::new();
         let (n, _sub) = create_notifier(&doc);
@@ -354,13 +356,13 @@ mod test {
 
     #[tokio::test]
     async fn changes_from_one_client_reach_others() -> Result<(), Box<dyn std::error::Error>> {
-        let server_addr = SocketAddr::from_str("127.0.0.1:6602").unwrap();
+        let bind_addr = SocketAddr::from_str("127.0.0.1:0").unwrap();
         let doc = Doc::with_client_id(1);
         let _text = doc.get_or_insert_text("test");
 
         let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server(server_addr, bcast).await?;
+        let (server_addr, _server) = start_server(bind_addr, bcast).await?;
 
         let d1 = Doc::with_client_id(2);
         let c1 = client(server_addr, d1).await?;

@@ -257,8 +257,9 @@ mod test {
     async fn start_server(
         addr: &str,
         bcast: Arc<BroadcastGroup>,
-    ) -> Result<JoinHandle<()>, Box<dyn std::error::Error>> {
+    ) -> Result<(String, JoinHandle<()>), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(addr).await?;
+        let bound_addr = listener.local_addr()?;
         let app = Router::new().route(
             "/my-room",
             get({
@@ -267,9 +268,10 @@ mod test {
             }),
         );
 
-        Ok(tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
-        }))
+        });
+        Ok((format!("ws://127.0.0.1:{}", bound_addr.port()), handle))
     }
 
     async fn ws_handler(ws: WebSocketUpgrade, bcast: Arc<BroadcastGroup>) -> impl IntoResponse {
@@ -382,11 +384,12 @@ mod test {
         let text = doc.get_or_insert_text("test");
         let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server("0.0.0.0:6600", Arc::new(bcast)).await.unwrap();
+        let (server_url, _server) = start_server("0.0.0.0:0", Arc::new(bcast)).await.unwrap();
 
         let doc = Doc::new();
         let (n, _sub) = create_notifier(&doc);
-        let _c1 = client("ws://localhost:6600/my-room", doc).await.unwrap();
+        let client_url = format!("{}/my-room", server_url);
+        let _c1 = client(&client_url, doc).await.unwrap();
 
         {
             text.push(&mut awareness.doc().transact_mut(), "abc");
@@ -411,11 +414,12 @@ mod test {
 
         let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server("0.0.0.0:6601", Arc::new(bcast)).await.unwrap();
+        let (server_url, _server) = start_server("0.0.0.0:0", Arc::new(bcast)).await.unwrap();
 
         let doc = Doc::new();
         let (n, _sub) = create_notifier(&doc);
-        let c1 = client("ws://localhost:6601/my-room", doc).await.unwrap();
+        let client_url = format!("{}/my-room", server_url);
+        let c1 = client(&client_url, doc).await.unwrap();
 
         timeout(TIMEOUT, n.notified()).await.unwrap();
 
@@ -435,10 +439,11 @@ mod test {
 
         let awareness = Arc::new(Awareness::new(doc));
         let bcast = BroadcastGroup::new(awareness.clone(), 10).await;
-        let _server = start_server("0.0.0.0:6602", Arc::new(bcast)).await.unwrap();
+        let (server_url, _server) = start_server("0.0.0.0:0", Arc::new(bcast)).await.unwrap();
 
         let d1 = Doc::with_client_id(2);
-        let c1 = client("ws://localhost:6602/my-room", d1).await.unwrap();
+        let client_url = format!("{}/my-room", server_url);
+        let c1 = client(&client_url, d1).await.unwrap();
         // by default changes made by document on the client side are not propagated automatically
         let _sub11 = {
             let sink = c1.sink();
@@ -460,7 +465,7 @@ mod test {
 
         let d2 = Doc::with_client_id(3);
         let (n2, _sub2) = create_notifier(&d2);
-        let c2 = client("ws://localhost:6602/my-room", d2).await.unwrap();
+        let c2 = client(&client_url, d2).await.unwrap();
 
         {
             let a = c1.awareness();
