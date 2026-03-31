@@ -6,11 +6,44 @@ This library is an extension over [Yjs](https://yjs.dev)/[Yrs](https://github.co
 
 ## Features
 
-- **Y-WebSocket Protocol**: Full support for y-websocket provider protocol
-- **Y-WebRTC Signaling**: Built-in signaling server for y-webrtc connections
-- **Broadcast Groups**: Efficient document synchronization across multiple clients
-- **Custom Protocol Extensions**: Extend the protocol with your own message handlers
-- **Axum Integration**: Native axum websocket support with modern async/await patterns
+- **Y-WebSocket Protocol**: Full support for the y-websocket provider protocol, enabling seamless communication between Rust backends and Yjs clients
+- **Y-WebRTC Signaling**: Built-in signaling server for y-webrtc connections, allowing peers to discover and connect to each other via WebRTC
+- **Broadcast Groups**: Efficient document synchronization across multiple clients — all connected peers receive document and awareness updates in real time
+- **Custom Protocol Extensions**: Extend the y-sync protocol with your own message handlers by implementing the `Protocol` trait
+- **Axum Integration**: Native axum websocket support with modern async/await patterns and full compatibility with axum's extractor system
+- **Awareness Propagation**: Automatic propagation of user presence/cursor data to all subscribed clients
+- **Direct Connection Handling**: Fine-grained control over individual peer connections via the `Connection` type
+
+## Architecture Overview
+
+`yrs-ax` is composed of four main modules:
+
+| Module | Description |
+|--------|-------------|
+| `broadcast` | [`BroadcastGroup`] — manages a shared [`Awareness`] instance and fans out document/awareness updates to all subscribed WebSocket peers |
+| `conn` | [`Connection`] — low-level handler for a single peer connection; drives the y-sync handshake (SyncStep1 → SyncStep2 → updates) and dispatches incoming messages to a [`Protocol`] implementation |
+| `ws` | [`AxumSink`] / [`AxumStream`] — thin wrappers that adapt axum's WebSocket sink/stream types into the `futures` `Sink`/`Stream` traits expected by `y-sync` |
+| `signaling` | [`SignalingService`] / `signaling_conn` — a WebSocket-based room/topic pub-sub service used by y-webrtc clients to exchange WebRTC offer/answer metadata |
+
+### Typical Data Flow
+
+```
+Yjs Client (browser)
+      │  WebSocket
+      ▼
+  AxumStream / AxumSink   ← ws.rs adapters
+      │
+      ▼
+  BroadcastGroup          ← broadcast.rs
+  ├── stream_task: decode incoming y-sync messages, apply to shared Doc/Awareness
+  └── sink_task:  receive broadcast channel messages, forward to this client
+      │
+      ▼
+  Shared Awareness (yrs::Doc + Awareness)
+      │  observe_update / on_update callbacks
+      ▼
+  broadcast channel  →  all other connected clients
+```
 
 ## Demo
 
@@ -31,9 +64,11 @@ cargo run --example main
 
 Then open `http://localhost:8000` in multiple browser windows to see real-time collaboration.
 
-## Example: Broadcast Group
+## Usage Examples
 
-To gossip updates between different WebSocket connections from clients collaborating over the same logical document, use a broadcast group:
+### Broadcast Group (y-websocket)
+
+The most common pattern — share a single document across any number of WebSocket clients. Every document update and awareness change produced by one peer is immediately propagated to all others.
 
 ```rust
 use std::sync::Arc;
@@ -79,7 +114,7 @@ async fn peer(ws: WebSocket, bcast: Arc<BroadcastGroup>) {
     let sink = Arc::new(Mutex::new(AxumSink::from(sink)));
     let stream = AxumStream::from(stream);
     let sub = bcast.subscribe(sink, stream);
-    
+
     match sub.completed().await {
         Ok(_) => println!("broadcasting for channel finished successfully"),
         Err(e) => eprintln!("broadcasting for channel finished abruptly: {}", e),
@@ -87,7 +122,7 @@ async fn peer(ws: WebSocket, bcast: Arc<BroadcastGroup>) {
 }
 ```
 
-## Custom Protocol Extensions
+### Custom Protocol Extensions
 
 [y-sync](https://crates.io/crates/y-sync) protocol enables extensions to its own protocol, and yrs-ax supports this as well. You can implement your own protocol by implementing the `Protocol` trait:
 
@@ -114,16 +149,22 @@ async fn peer(ws: WebSocket, bcast: Arc<BroadcastGroup>) {
     let (sink, stream) = ws.split();
     let sink = Arc::new(Mutex::new(AxumSink::from(sink)));
     let stream = AxumStream::from(stream);
-    
+
     // Subscribe with custom protocol parameter
     let sub = bcast.subscribe_with(sink, stream, EchoProtocol);
     // ... rest of the code
 }
 ```
 
-## Y-WebRTC and Signaling Service
+### Y-WebRTC Signaling Service
 
 In addition to performing its role as a [y-websocket](https://docs.yjs.dev/ecosystem/connection-provider/y-websocket) server, `yrs-ax` also provides a signaling server implementation used by [y-webrtc](https://github.com/yjs/y-webrtc) clients to exchange information necessary to connect WebRTC peers together and make them subscribe/unsubscribe from specific rooms.
+
+The `SignalingService` handles three message types sent by y-webrtc clients:
+
+- **subscribe** — join one or more named rooms
+- **unsubscribe** — leave rooms
+- **publish** — broadcast a message to every other subscriber in a room
 
 ```rust
 use axum::{
@@ -160,6 +201,56 @@ async fn peer(ws: WebSocket, svc: SignalingService) {
         Ok(_) => println!("signaling connection stopped"),
         Err(e) => eprintln!("signaling connection failed: {}", e),
     }
+}
+```
+
+### Combining WebSocket Sync and WebRTC Signaling
+
+Both services can run side by side in the same axum application:
+
+```rust
+use std::sync::Arc;
+use axum::{Router, extract::ws::{WebSocket, WebSocketUpgrade}, response::IntoResponse, routing::get};
+use tokio::sync::Mutex;
+use yrs::Doc;
+use yrs_ax::broadcast::BroadcastGroup;
+use yrs_ax::signaling::{SignalingService, signaling_conn};
+use yrs_ax::ws::{AxumSink, AxumStream};
+
+#[tokio::main]
+async fn main() {
+    let awareness = Arc::new(yrs::sync::Awareness::new(Doc::new()));
+    let bcast = Arc::new(BroadcastGroup::new(awareness, 32).await);
+    let signaling = SignalingService::new();
+
+    let app = Router::new()
+        .route("/ws", get({
+            let bcast = bcast.clone();
+            move |ws: WebSocketUpgrade| async move {
+                ws.on_upgrade(move |socket| ws_peer(socket, bcast))
+            }
+        }))
+        .route("/signaling", get({
+            let signaling = signaling.clone();
+            move |ws: WebSocketUpgrade| async move {
+                ws.on_upgrade(move |socket| signaling_peer(socket, signaling))
+            }
+        }));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+
+async fn ws_peer(ws: WebSocket, bcast: Arc<BroadcastGroup>) {
+    let (sink, stream) = ws.split();
+    let sink = Arc::new(Mutex::new(AxumSink::from(sink)));
+    let stream = AxumStream::from(stream);
+    let sub = bcast.subscribe(sink, stream);
+    let _ = sub.completed().await;
+}
+
+async fn signaling_peer(ws: WebSocket, svc: SignalingService) {
+    let _ = signaling_conn(ws, svc).await;
 }
 ```
 
