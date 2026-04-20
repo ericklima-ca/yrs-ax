@@ -161,6 +161,16 @@ impl BroadcastGroup {
         let stream_task = {
             let awareness = self.awareness().clone();
             tokio::spawn(async move {
+                let payload = {
+                    let mut encoder = EncoderV1::new();
+                    let awareness = awareness.as_ref();
+                    protocol.start(&awareness, &mut encoder)?;
+                    encoder.to_vec()
+                };
+                if !payload.is_empty() {
+                    let mut s = sink.lock().await;
+                    s.send(payload).await.map_err(|e| Error::Other(e.into()))?;
+                }
                 while let Some(res) = stream.next().await {
                     let msg = Message::decode_v1(&res.map_err(|e| Error::Other(Box::new(e)))?)?;
                     let reply = Self::handle_msg(&protocol, &awareness, msg).await?;
@@ -298,6 +308,14 @@ mod test {
         let (server_sender, mut client_receiver) = test_channel(1);
         let (mut client_sender, server_receiver) = test_channel(1);
         let _sub1 = group.subscribe(Arc::new(Mutex::new(server_sender)), server_receiver);
+
+        // check initial sync handshake
+        let msg = client_receiver.next().await;
+        let msg = msg.map(|x| Message::decode_v1(&x.unwrap()).unwrap());
+        assert!(matches!(
+            msg,
+            Some(Message::Sync(SyncMessage::SyncStep1(_)))
+        ));
 
         // check update propagation
         {
